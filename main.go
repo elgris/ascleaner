@@ -22,41 +22,7 @@ type Config struct {
 	Timeout    time.Duration
 }
 
-type ProcConfig struct {
-	Client    *aerospike.Client
-	Namespace string
-	Set       string
-	Done      chan<- error
-}
-
-type Processor func()
-
 const defaultPort = 3000
-
-type ErrBroadcaster struct {
-	listeners []chan<- error
-	input     chan error
-}
-
-func NewErrBroadcaster() *ErrBroadcaster {
-	return &ErrBroadcaster{
-		listeners: []chan<- error{},
-		input:     make(chan error),
-	}
-}
-
-func (this *ErrBroadcaster) AddListener(ch chan<- error) { this.listeners = append(this.listeners, ch) }
-func (this *ErrBroadcaster) Input() chan<- error         { return this.input }
-
-func (this *ErrBroadcaster) Listen() {
-	for err := range this.input {
-		for i := range this.listeners {
-			go func(listener chan<- error) {
-				listener <- err
-			}(this.listeners[i])
-		}
-	}
-}
 
 func main() {
 	c := getConfig()
@@ -76,7 +42,7 @@ func main() {
 	}
 
 	log.Printf("received '%d' nodes, will be using first one to get lists of sets", len(nodes))
-	conn, err := nodes[0].GetConnection(5 * time.Second)
+	conn, err := nodes[0].GetConnection(c.Timeout)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -87,137 +53,69 @@ func main() {
 	}
 
 	sets := extractSets(infoMap["sets"])
-
 	var wg sync.WaitGroup
 
 	for _, set := range sets {
-		log.Printf("Starting removing data from set %s", set)
 		wg.Add(1)
-		func(set string) {
+
+		go func(wg *sync.WaitGroup, set string) {
 			defer wg.Done()
-			broadcaster := NewErrBroadcaster()
-
-			pc := &ProcConfig{
-				Client:    client,
-				Namespace: c.Namespace,
-				Set:       set,
-				Done:      broadcaster.Input(),
+			log.Printf("starting removing data from set %s", set)
+			if err := clearSet(client, c.Namespace, set, c.BufferSize); err != nil {
+				log.Printf("clearing set %s failed: %s", set, err.Error())
 			}
-
-			kg, keyChan, kgErrChan := getKeysGetter(pc)
-			kr, finishChan, krErrChan := getKeysRemover(pc, c.BufferSize, keyChan)
-			output := make(chan error)
-
-			broadcaster.AddListener(kgErrChan)
-			broadcaster.AddListener(krErrChan)
-			broadcaster.AddListener(output)
-			go broadcaster.Listen()
-
-			go kg()
-			go kr()
-
-			select {
-			case <-output:
-			case <-finishChan:
-				log.Printf("Cleaning set %s completed\n\n", set)
-			}
-		}(set)
+		}(&wg, set)
 	}
 
 	wg.Wait()
 }
 
-func getKeysGetter(config *ProcConfig) (Processor, <-chan aerospike.Key, chan<- error) {
-	keyChan := make(chan aerospike.Key)
-	errChan := make(chan error)
-
-	var errBroadcast error
-	go func() {
-		errBroadcast = <-errChan
-	}()
-
-	var p Processor = func() {
-		defer close(keyChan)
-
-		rs, err := config.Client.ScanAll(nil, config.Namespace, config.Set)
-		if err != nil {
-			config.Done <- err
-			return
-		}
-		for record := range rs.Results() {
-			if errBroadcast != nil {
-				log.Printf("Getting keys aborted. Reason: %s", errBroadcast.Error())
-				return
-			}
-			if record.Err != nil {
-				config.Done <- record.Err
-				return
-			}
-
-			keyChan <- *record.Record.Key
-		}
+func clearSet(client *aerospike.Client, ns, set string, bufferSize int) error {
+	rs, err := client.ScanAll(nil, ns, set)
+	if err != nil {
+		return err
 	}
 
-	return p, keyChan, errChan
-}
-
-func getKeysRemover(config *ProcConfig, bufferSize int, keyChan <-chan aerospike.Key) (Processor, <-chan string, chan<- error) {
-	errChan := make(chan error)
-	doneChan := make(chan string)
-
-	var errBroadcast error
-	go func() {
-		errBroadcast = <-errChan
-	}()
-
+	buffer := make([]aerospike.Key, 0, bufferSize)
 	var wg sync.WaitGroup
-
-	var p Processor = func() {
-		buffer := make([]aerospike.Key, 0, bufferSize)
-
-		for key := range keyChan {
-			if len(buffer) == bufferSize {
-				wg.Add(1)
-				go removeKeys(config.Client, buffer, config.Done, &wg)
-
-				buffer = make([]aerospike.Key, 0, bufferSize)
-			}
-
-			if errBroadcast != nil {
-				log.Printf("removing keys aborted. Reason: %s", errBroadcast.Error())
-				return
-			}
-
-			buffer = append(buffer, key)
+	for record := range rs.Results() {
+		if record.Err != nil {
+			return err
 		}
 
-		if len(buffer) > 0 {
+		buffer = append(buffer, *record.Record.Key)
+
+		if len(buffer) == bufferSize {
 			wg.Add(1)
-			go removeKeys(config.Client, buffer, config.Done, &wg)
+			go removeKeys(client, buffer, set, &wg)
+
+			buffer = make([]aerospike.Key, 0, bufferSize)
 		}
-
-		wg.Wait()
-
-		doneChan <- config.Set
 	}
 
-	return p, doneChan, errChan
+	if len(buffer) > 0 {
+		wg.Add(1)
+		go removeKeys(client, buffer, set, &wg)
+	}
+
+	wg.Wait()
+	return nil
 }
 
-func removeKeys(client *aerospike.Client, keys []aerospike.Key, errChan chan<- error, wg *sync.WaitGroup) {
+func removeKeys(client *aerospike.Client, keys []aerospike.Key, set string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	log.Printf("Removing %d keys...", len(keys))
+	log.Printf("removing %d keys in set %s...", len(keys), set)
 	removed := 0
 	for i := range keys {
 		if ok, err := client.Delete(nil, &keys[i]); err != nil {
-			errChan <- err
+			log.Printf("removing keys from set %s failed: %s", set, err.Error())
 			return
 		} else if ok {
 			removed++
 		}
 	}
-	log.Printf("Removed %d of %d keys...", removed, len(keys))
+	log.Printf("removed %d of %d keys in set %s", removed, len(keys), set)
 }
 
 func extractSets(infoStr string) []string {
