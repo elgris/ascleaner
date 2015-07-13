@@ -1,6 +1,6 @@
 # A tiny tool to clear Aerospike sets
 
-Of course, there is official tool: https://github.com/aerospike/delete-set
+Of course, there is an official tool: https://github.com/aerospike/delete-set
 
 But this one is written in Go and much faster.
 
@@ -8,7 +8,7 @@ But this one is written in Go and much faster.
 
 Install it with:
 ```
-go install github.com/elgris/ascleaner
+go get github.com/elgris/ascleaner
 ```
 
 Run it like this:
