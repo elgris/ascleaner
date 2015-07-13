@@ -53,6 +53,15 @@ func main() {
 	}
 
 	sets := extractSets(infoMap["sets"])
+	if len(c.Sets) > 0 {
+		sets = intersectStrings(sets, c.Sets)
+	}
+
+	if len(sets) == 0 {
+		log.Println("no sets to clean")
+		return
+	}
+
 	var wg sync.WaitGroup
 
 	for _, set := range sets {
@@ -68,6 +77,96 @@ func main() {
 	}
 
 	wg.Wait()
+}
+
+func getConfig() (c Config) {
+	var hostsStr string
+	var setsStr string
+
+	flag.StringVar(&hostsStr, "h", "localhost:3000", "Comma-separated list of aerospike hosts")
+	flag.StringVar(&c.Namespace, "n", "", "Data namespace")
+	flag.StringVar(&setsStr, "s", "", "Comma-separated list of set names to erase")
+	flag.IntVar(&c.BufferSize, "b", 25000, "Size of the buffer to pre-load keys before deleting")
+	flag.DurationVar(&c.Timeout, "t", 5*time.Second, "Connection timeout")
+
+	flag.Parse()
+
+	c.Hosts = strings.Split(hostsStr, ",")
+	c.Sets = strings.Split(setsStr, ",")
+
+	return
+}
+
+func connectToAerospike(hostStrings []string) (*aerospike.Client, error) {
+	if len(hostStrings) == 0 {
+		return nil, errors.New("no aerospike host provided")
+	}
+
+	hosts := make([]*aerospike.Host, len(hostStrings))
+	for i, connStr := range hostStrings {
+		hostStr, portStr, err := net.SplitHostPort(connStr)
+		if err != nil {
+			if isErrNoPort(err) {
+				hosts[i] = aerospike.NewHost(connStr, defaultPort)
+				continue
+			}
+			return nil, fmt.Errorf("could not split host string '%s' by host and port: %s", connStr, err.Error())
+		}
+
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("could determine port number from string '%s': %s", connStr, err.Error())
+		}
+		hosts[i] = aerospike.NewHost(hostStr, port)
+	}
+
+	return aerospike.NewClientWithPolicyAndHost(nil, hosts...)
+}
+
+func isErrNoPort(err error) bool {
+	if addrErr, ok := err.(*net.AddrError); ok {
+		return addrErr.Err == "missing port in address"
+	}
+
+	return false
+}
+
+func extractSets(infoStr string) []string {
+	opts := strings.Split(infoStr, ":")
+	sets := []string{}
+	for _, opt := range opts {
+		if opt[:9] == "set_name=" {
+			sets = append(sets, opt[9:])
+		}
+	}
+
+	return sets
+}
+
+func intersectStrings(sl1, sl2 []string) []string {
+	l1 := len(sl1)
+	l2 := len(sl2)
+	if l1 == 0 || l2 == 0 {
+		return []string{}
+	}
+
+	minLen := l1
+	if l1 > l2 {
+		minLen = l2
+	}
+
+	res := make([]string, 0, minLen)
+
+	for _, s1 := range sl1 {
+		for _, s2 := range sl2 {
+			if s1 == s2 {
+				res = append(res, s1)
+				break
+			}
+		}
+	}
+
+	return res
 }
 
 func clearSet(client *aerospike.Client, ns, set string, bufferSize int) error {
@@ -116,68 +215,4 @@ func removeKeys(client *aerospike.Client, keys []aerospike.Key, set string, wg *
 		}
 	}
 	log.Printf("removed %d of %d keys in set %s", removed, len(keys), set)
-}
-
-func extractSets(infoStr string) []string {
-	opts := strings.Split(infoStr, ":")
-	sets := []string{}
-	for _, opt := range opts {
-		if opt[:9] == "set_name=" {
-			sets = append(sets, opt[9:])
-		}
-	}
-
-	return sets
-}
-
-func connectToAerospike(hostStrings []string) (*aerospike.Client, error) {
-	if len(hostStrings) == 0 {
-		return nil, errors.New("no aerospike host provided")
-	}
-
-	hosts := make([]*aerospike.Host, len(hostStrings))
-	for i, connStr := range hostStrings {
-		hostStr, portStr, err := net.SplitHostPort(connStr)
-		if err != nil {
-			if isErrNoPort(err) {
-				hosts[i] = aerospike.NewHost(connStr, defaultPort)
-				continue
-			}
-			return nil, fmt.Errorf("could not split host string '%s' by host and port: %s", connStr, err.Error())
-		}
-
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			return nil, fmt.Errorf("could determine port number from string '%s': %s", connStr, err.Error())
-		}
-		hosts[i] = aerospike.NewHost(hostStr, port)
-	}
-
-	return aerospike.NewClientWithPolicyAndHost(nil, hosts...)
-}
-
-func isErrNoPort(err error) bool {
-	if addrErr, ok := err.(*net.AddrError); ok {
-		return addrErr.Err == "missing port in address"
-	}
-
-	return false
-}
-
-func getConfig() (c Config) {
-	var hostsStr string
-	var setsStr string
-
-	flag.StringVar(&hostsStr, "h", "localhost:3000", "Comma-separated list of aerospike hosts")
-	flag.StringVar(&c.Namespace, "n", "", "Data namespace")
-	flag.StringVar(&setsStr, "s", "", "Comma-separated list of set names to erase")
-	flag.IntVar(&c.BufferSize, "buffer", 25000, "Size of the buffer to pre-load keys before deleting")
-	flag.DurationVar(&c.Timeout, "timeout", 5*time.Second, "Connection timeout")
-
-	flag.Parse()
-
-	c.Hosts = strings.Split(hostsStr, ",")
-	c.Sets = strings.Split(setsStr, ",")
-
-	return
 }
