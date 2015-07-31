@@ -92,7 +92,9 @@ func getConfig() (c Config) {
 	flag.Parse()
 
 	c.Hosts = strings.Split(hostsStr, ",")
-	c.Sets = strings.Split(setsStr, ",")
+	if setsStr != "" {
+		c.Sets = strings.Split(setsStr, ",")
+	}
 
 	return
 }
