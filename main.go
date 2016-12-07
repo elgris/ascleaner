@@ -137,8 +137,8 @@ func extractSets(infoStr string) []string {
 	opts := strings.Split(infoStr, ":")
 	sets := []string{}
 	for _, opt := range opts {
-		if opt[:9] == "set_name=" {
-			sets = append(sets, opt[9:])
+		if len(opt) > 4 && opt[:4] == "set=" {
+			sets = append(sets, opt[4:])
 		}
 	}
 
