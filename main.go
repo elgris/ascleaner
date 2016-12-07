@@ -137,7 +137,11 @@ func extractSets(infoStr string) []string {
 	opts := strings.Split(infoStr, ":")
 	sets := []string{}
 	for _, opt := range opts {
-		if opt[:9] == "set_name=" {
+		if len(opt) > 4 && opt[:4] == "set=" {
+			// works for aerospike info from v.3.9.0
+			sets = append(sets, opt[4:])
+		} else if len(opt) > 9 && opt[:9] == "set_name=" {
+			// works for legacy versions (below 3.9.0)
 			sets = append(sets, opt[9:])
 		}
 	}
